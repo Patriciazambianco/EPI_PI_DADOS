@@ -13,7 +13,7 @@ def carregar_dados():
     col_data = [col for col in df.columns if 'INSPECAO' in col.upper()]
 
     if not col_tec or not col_prod or not col_data:
-        st.error("❌ Arquivo inválido. Falta coluna TECNICO, PRODUTO ou INSPECAO.")
+        st.error("❌ Verifique se o arquivo contém colunas de TÉCNICO, PRODUTO e INSPEÇÃO.")
         return pd.DataFrame()
 
     tecnico_col = col_tec[0]
@@ -21,121 +21,129 @@ def carregar_dados():
     data_col = col_data[0]
 
     df.rename(columns={
-        tecnico_col: 'TECNICO',
-        produto_col: 'PRODUTO',
-        data_col: 'DATA_INSPECAO',
         'GERENTE': 'GERENTE_IMEDIATO',
-        'COORDENADOR': 'COORDENADOR_IMEDIATO',
         'SITUAÇÃO CHECK LIST': 'STATUS CHECK LIST'
     }, inplace=True)
 
-    df['DATA_INSPECAO'] = pd.to_datetime(df['DATA_INSPECAO'], errors='coerce')
+    df['Data_Inspecao'] = pd.to_datetime(df[data_col], errors='coerce')
 
-    # Chave única TECNICO+PRODUTO
-    df['CHAVE'] = df['TECNICO'].astype(str).str.strip() + "|" + df['PRODUTO'].astype(str).str.strip()
+    # Cria uma chave única TECNICO + PRODUTO
+    df['CHAVE'] = df[tecnico_col].astype(str).str.strip() + "|" + df[produto_col].astype(str).str.strip()
 
     # Separar com e sem data
-    df_com_data = df.dropna(subset=['DATA_INSPECAO']).copy()
-    df_sem_data = df[df['DATA_INSPECAO'].isna()].copy()
+    df_com_data = df.dropna(subset=['Data_Inspecao']).copy()
+    df_sem_data = df[df['Data_Inspecao'].isna()].copy()
 
-    # Última inspeção por chave (técnico + produto)
-    df_com_data.sort_values('DATA_INSPECAO', ascending=False, inplace=True)
+    # Pegar a última inspeção por chave (técnico + produto)
+    df_com_data.sort_values('Data_Inspecao', ascending=False, inplace=True)
     df_ultimos = df_com_data.drop_duplicates(subset='CHAVE', keep='first')
 
+    # Filtrar pendentes SEM inspeção (sem estar entre os últimos)
     chaves_com_data = set(df_ultimos['CHAVE'])
     df_sem_data = df_sem_data[~df_sem_data['CHAVE'].isin(chaves_com_data)]
 
-    df_final = pd.concat([df_ultimos, df_sem_data], ignore_index=True)
+    # Junta os dois (última inspeção + pendentes nunca inspecionados)
+    df_resultado = pd.concat([df_ultimos, df_sem_data], ignore_index=True)
 
-    # Ajusta status e cálculo pendência
-    if 'STATUS CHECK LIST' in df_final.columns:
-        df_final['STATUS CHECK LIST'] = df_final['STATUS CHECK LIST'].astype(str).str.upper()
-    else:
-        st.warning("⚠️ Coluna 'STATUS CHECK LIST' não encontrada, usando padrão para pendente/ok.")
-        df_final['STATUS CHECK LIST'] = 'PENDENTE'
+    # Renomeia para padronizar
+    df_resultado.rename(columns={
+        tecnico_col: 'TECNICO',
+        produto_col: 'PRODUTO'
+    }, inplace=True)
+
+    # Ajusta status e vencimento
+    if 'STATUS CHECK LIST' in df_resultado.columns:
+        df_resultado['STATUS CHECK LIST'] = df_resultado['STATUS CHECK LIST'].str.upper()
 
     hoje = pd.Timestamp.now().normalize()
-    df_final['Dias_Sem_Inspecao'] = (hoje - df_final['DATA_INSPECAO']).dt.days.fillna(-1)
-    df_final['Vencido'] = df_final['Dias_Sem_Inspecao'] > 180
+    df_resultado['Dias_Sem_Inspecao'] = (hoje - df_resultado['Data_Inspecao']).dt.days
+    df_resultado['Vencido'] = df_resultado['Dias_Sem_Inspecao'] > 180
 
-    return df_final.drop(columns=['CHAVE'])
+    return df_resultado.drop(columns=['CHAVE'])
 
 
 def calcula_percentuais(df, grupo_col):
-    resumo = df.groupby(grupo_col).agg(
-        total=('STATUS CHECK LIST', 'count'),
-        ok=lambda x: (x == 'OK').sum(),
-        pendente=lambda x: (x != 'OK').sum()
-    ).reset_index()
+    resumo = df.groupby(grupo_col).agg({
+        'STATUS CHECK LIST': ['count', lambda x: (x == 'OK').sum(), lambda x: (x != 'OK').sum()]
+    })
+    resumo.columns = ['total', 'ok', 'pendente']
+    resumo = resumo.reset_index()
     resumo['% OK'] = 100 * resumo['ok'] / resumo['total']
     resumo['% Pendente'] = 100 * resumo['pendente'] / resumo['total']
     return resumo
 
 
-def gera_grafico_pizza(df, grupo_col, titulo):
-    resumo = calcula_percentuais(df, grupo_col)
-    fig = px.pie(
-        resumo,
-        names=grupo_col,
-        values='% OK',
-        title=f'% EPI OK por {titulo}',
-        hole=0.4
-    )
-    return fig
+def exibe_cards(df):
+    st.header("Indicadores de Inspeção de EPI")
+
+    perc_gerente = calcula_percentuais(df, 'GERENTE_IMEDIATO')
+    perc_coordenador = calcula_percentuais(df, 'COORDENADOR_IMEDIATO') if 'COORDENADOR_IMEDIATO' in df.columns else None
+
+    st.subheader("Por Gerente")
+    cols = st.columns(len(perc_gerente))
+    for i, row in perc_gerente.iterrows():
+        with cols[i]:
+            st.markdown(f"### {row['GERENTE_IMEDIATO']}")
+            st.metric(label="% EPI OK", value=f"{row['% OK']:.1f}%")
+            st.metric(label="% EPI Pendente", value=f"{row['% Pendente']:.1f}%")
+
+
+    if perc_coordenador is not None:
+        st.subheader("Por Coordenador")
+        cols = st.columns(len(perc_coordenador))
+        for i, row in perc_coordenador.iterrows():
+            with cols[i]:
+                st.markdown(f"### {row['COORDENADOR_IMEDIATO']}")
+                st.metric(label="% EPI OK", value=f"{row['% OK']:.1f}%")
+                st.metric(label="% EPI Pendente", value=f"{row['% Pendente']:.1f}%")
 
 
 def gera_grafico_barra(df, grupo_col, titulo):
     resumo = calcula_percentuais(df, grupo_col)
-    fig = px.bar(
-        resumo,
-        x=grupo_col,
-        y=['% OK', '% Pendente'],
-        barmode='group',
-        title=f'% EPI OK e Pendente por {titulo}'
-    )
-    return fig
+    fig = px.bar(resumo, x=grupo_col, y=['% OK', '% Pendente'],
+                 title=f"Percentual de EPI OK/Pendente por {titulo}",
+                 labels={grupo_col: titulo, "value": "Percentual (%)"},
+                 barmode='group',
+                 height=400)
+    st.plotly_chart(fig, use_container_width=True)
 
 
-def botao_exportar(df):
-    df_pendentes = df[df['STATUS CHECK LIST'] != 'OK']
-    if df_pendentes.empty:
-        st.info("Nenhum EPI pendente para exportar.")
-        return
-
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+def botao_exportar(df_pendentes):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df_pendentes.to_excel(writer, index=False, sheet_name='Pendentes')
         writer.save()
-    buffer.seek(0)
-
+    processed_data = output.getvalue()
     st.download_button(
         label="📥 Exportar Pendentes para Excel",
-        data=buffer,
-        file_name='epi_pendentes.xlsx',
-        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        data=processed_data,
+        file_name="pendentes_epi.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
 
 def main():
-    st.title("Painel de Verificação de EPI")
+    st.title("Dashboard de Inspeção de EPIs")
+
     df = carregar_dados()
     if df.empty:
-        st.warning("⚠️ Nenhum dado carregado.")
         return
 
-    st.header("Gráficos de Status por Gerente")
-    fig_gerente = gera_grafico_barra(df, 'GERENTE_IMEDIATO', 'Gerente')
-    st.plotly_chart(fig_gerente, use_container_width=True)
+    exibe_cards(df)
 
-    st.header("Gráficos de Status por Coordenador")
-    fig_coordenador = gera_grafico_barra(df, 'COORDENADOR_IMEDIATO', 'Coordenador')
-    st.plotly_chart(fig_coordenador, use_container_width=True)
+    st.markdown("---")
 
-    st.header("Tabela Completa dos Dados")
+    gera_grafico_barra(df, 'GERENTE_IMEDIATO', 'Gerente')
+
+    if 'COORDENADOR_IMEDIATO' in df.columns:
+        gera_grafico_barra(df, 'COORDENADOR_IMEDIATO', 'Coordenador')
+
+    st.markdown("---")
+    st.header("Tabela Completa")
     st.dataframe(df)
 
-    st.header("Exportar Pendentes")
-    botao_exportar(df)
+    df_pendentes = df[df['STATUS CHECK LIST'] != 'OK']
+    botao_exportar(df_pendentes)
 
 
 if __name__ == "__main__":
