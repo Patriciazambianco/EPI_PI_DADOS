@@ -1,67 +1,81 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 
-# Testa se tem o decorator cache_data, senão usa cache (fallback)
-try:
-    cache_decorator = st.cache_data
-except AttributeError:
-    cache_decorator = st.cache
-
-@cache_decorator
+# Sua função de carregar dados (ajuste conforme seu arquivo)
+@st.cache_data
 def carregar_dados():
     df = pd.read_excel("LISTA DE VERIFICAÇÃO EPI.xlsx", engine="openpyxl")
     df.columns = df.columns.str.strip()
 
-    col_tec = [col for col in df.columns if 'TECNICO' in col.upper()]
-    col_prod = [col for col in df.columns if 'PRODUTO' in col.upper()]
-    col_data = [col for col in df.columns if 'INSPECAO' in col.upper()]
-
-    if not col_tec or not col_prod or not col_data:
-        st.error("❌ Arquivo precisa ter colunas TECNICO, PRODUTO e INSPEÇÃO.")
-        return pd.DataFrame()
-
-    tecnico_col = col_tec[0]
-    produto_col = col_prod[0]
-    data_col = col_data[0]
-
+    # Padronizando nomes das colunas importantes
     df.rename(columns={
         'GERENTE': 'GERENTE_IMEDIATO',
+        'COORDENADOR': 'COORDENADOR_IMEDIATO',
         'SITUAÇÃO CHECK LIST': 'STATUS CHECK LIST'
     }, inplace=True)
 
-    df['Data_Inspecao'] = pd.to_datetime(df[data_col], errors='coerce')
-    df['CHAVE'] = df[tecnico_col].astype(str).str.strip() + "|" + df[produto_col].astype(str).str.strip()
+    # Ajusta status para caixa alta
+    if 'STATUS CHECK LIST' in df.columns:
+        df['STATUS CHECK LIST'] = df['STATUS CHECK LIST'].str.upper()
 
-    df_com_data = df.dropna(subset=['Data_Inspecao']).copy()
-    df_sem_data = df[df['Data_Inspecao'].isna()].copy()
+    return df
 
-    df_com_data.sort_values('Data_Inspecao', ascending=False, inplace=True)
-    df_ultimos = df_com_data.drop_duplicates(subset='CHAVE', keep='first')
+def calcula_percentuais(df, grupo_col):
+    resumo = df.groupby(grupo_col).agg(
+        total = ('STATUS CHECK LIST', 'count'),
+        ok = (lambda x: (x == 'OK').sum()),
+        pendente = (lambda x: (x != 'OK').sum())
+    )
+    resumo['% OK'] = (resumo['ok'] / resumo['total'] * 100).round(2)
+    resumo['% Pendente'] = (resumo['pendente'] / resumo['total'] * 100).round(2)
+    resumo = resumo.reset_index()
+    return resumo
 
-    chaves_com_data = set(df_ultimos['CHAVE'])
-    df_sem_data = df_sem_data[~df_sem_data['CHAVE'].isin(chaves_com_data)]
+def exibe_cards(df):
+    st.header("Indicadores de EPI por Gerente e Coordenador")
 
-    df_resultado = pd.concat([df_ultimos, df_sem_data], ignore_index=True)
+    # Filtro por gerente
+    gerentes = df['GERENTE_IMEDIATO'].dropna().unique()
+    gerente_selecionado = st.selectbox("Selecione o Gerente", options=sorted(gerentes))
 
-    df_resultado.rename(columns={
-        tecnico_col: 'TECNICO',
-        produto_col: 'PRODUTO'
-    }, inplace=True)
+    df_gerente = df[df['GERENTE_IMEDIATO'] == gerente_selecionado]
 
-    if 'STATUS CHECK LIST' in df_resultado.columns:
-        df_resultado['STATUS CHECK LIST'] = df_resultado['STATUS CHECK LIST'].str.upper()
+    # Cards por Gerente
+    perc_gerente = calcula_percentuais(df_gerente, 'GERENTE_IMEDIATO')
+    for _, row in perc_gerente.iterrows():
+        col1, col2 = st.columns(2)
+        col1.metric(label=f"{row['GERENTE_IMEDIATO']} - % EPI OK", value=f"{row['% OK']}%")
+        col2.metric(label=f"{row['GERENTE_IMEDIATO']} - % EPI Pendente", value=f"{row['% Pendente']}%")
 
-    hoje = pd.Timestamp.now().normalize()
-    df_resultado['Dias_Sem_Inspecao'] = (hoje - df_resultado['Data_Inspecao']).dt.days
-    df_resultado['Vencido'] = df_resultado['Dias_Sem_Inspecao'] > 180
+    # Cards e gráfico por Coordenador
+    if 'COORDENADOR_IMEDIATO' in df_gerente.columns:
+        perc_coord = calcula_percentuais(df_gerente, 'COORDENADOR_IMEDIATO')
+        st.subheader(f"Por Coordenador do Gerente {gerente_selecionado}")
+        for _, row in perc_coord.iterrows():
+            col1, col2 = st.columns(2)
+            col1.metric(label=f"{row['COORDENADOR_IMEDIATO']} - % EPI OK", value=f"{row['% OK']}%")
+            col2.metric(label=f"{row['COORDENADOR_IMEDIATO']} - % EPI Pendente", value=f"{row['% Pendente']}%")
 
-    return df_resultado.drop(columns=['CHAVE'])
+        # Gráfico barras lado a lado para coordenadores
+        fig = px.bar(
+            perc_coord,
+            x='COORDENADOR_IMEDIATO',
+            y=['% OK', '% Pendente'],
+            barmode='group',
+            labels={'value': 'Percentual (%)', 'COORDENADOR_IMEDIATO': 'Coordenador'},
+            title=f'Percentual de EPI OK e Pendente por Coordenador do Gerente {gerente_selecionado}'
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 def main():
-    st.title("Painel EPI")
+    st.title("Dashboard de EPI - Status por Gerente e Coordenador")
     df = carregar_dados()
-    if not df.empty:
-        st.dataframe(df)
+    if df.empty:
+        st.error("Erro ao carregar dados ou dados vazios.")
+        return
+
+    exibe_cards(df)
 
 if __name__ == "__main__":
     main()
