@@ -1,4 +1,4 @@
-@st.cache_data
+@st.cache
 def carregar_dados():
     df = pd.read_excel("LISTA DE VERIFICAÇÃO EPI.xlsx", engine="openpyxl")
     df.columns = df.columns.str.strip()
