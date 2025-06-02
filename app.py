@@ -77,7 +77,7 @@ def botao_exportar(df_pendentes):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
         df_pendentes.to_excel(writer, index=False, sheet_name='Pendentes')
-        writer.save()
+      
     buffer.seek(0)
 
     st.download_button(
